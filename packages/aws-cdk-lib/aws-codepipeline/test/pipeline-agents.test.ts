@@ -46,9 +46,19 @@ describe('Pipeline Troubleshooting Agent', () => {
     });
   });
 
+  test('throws when agent is enabled without pipelineName', () => {
+    const stack = new cdk.Stack();
+    expect(() => {
+      createPipeline(stack, {
+        agents: { troubleshooting: { enabled: true } },
+      });
+    }).toThrow(/'pipelineName' is required when the troubleshooting agent is enabled/);
+  });
+
   test('agent enabled creates S3 bucket with correct configuration', () => {
     const stack = new cdk.Stack();
     createPipeline(stack, {
+      pipelineName: 'MyPipeline',
       agents: { troubleshooting: { enabled: true } },
     });
     const template = Template.fromStack(stack);
@@ -96,6 +106,7 @@ describe('Pipeline Troubleshooting Agent', () => {
   test('agent enabled creates S3 bucket with SSL enforcement', () => {
     const stack = new cdk.Stack();
     createPipeline(stack, {
+      pipelineName: 'MyPipeline',
       agents: { troubleshooting: { enabled: true } },
     });
     const template = Template.fromStack(stack);
@@ -119,6 +130,7 @@ describe('Pipeline Troubleshooting Agent', () => {
   test('agent enabled creates IAM role with correct trust policy', () => {
     const stack = new cdk.Stack();
     createPipeline(stack, {
+      pipelineName: 'MyPipeline',
       agents: { troubleshooting: { enabled: true } },
     });
     const template = Template.fromStack(stack);
@@ -145,6 +157,7 @@ describe('Pipeline Troubleshooting Agent', () => {
   test('agent enabled attaches AWSCodePipelineTroubleshootingAgentAccess managed policy', () => {
     const stack = new cdk.Stack();
     createPipeline(stack, {
+      pipelineName: 'MyPipeline',
       agents: { troubleshooting: { enabled: true } },
     });
     const template = Template.fromStack(stack);
@@ -165,6 +178,7 @@ describe('Pipeline Troubleshooting Agent', () => {
   test('agent enabled creates inline policy with S3 write to agent bucket', () => {
     const stack = new cdk.Stack();
     createPipeline(stack, {
+      pipelineName: 'MyPipeline',
       agents: { troubleshooting: { enabled: true } },
     });
     const template = Template.fromStack(stack);
@@ -188,6 +202,7 @@ describe('Pipeline Troubleshooting Agent', () => {
   test('agent enabled creates inline policy with S3 read from artifact bucket', () => {
     const stack = new cdk.Stack();
     createPipeline(stack, {
+      pipelineName: 'MyPipeline',
       agents: { troubleshooting: { enabled: true } },
     });
     const template = Template.fromStack(stack);
@@ -211,6 +226,7 @@ describe('Pipeline Troubleshooting Agent', () => {
   test('agent enabled creates inline policy with CloudWatch Logs write', () => {
     const stack = new cdk.Stack();
     createPipeline(stack, {
+      pipelineName: 'MyPipeline',
       agents: { troubleshooting: { enabled: true } },
     });
     const template = Template.fromStack(stack);
@@ -231,6 +247,7 @@ describe('Pipeline Troubleshooting Agent', () => {
   test('agent enabled adds PipelineAgents property with correct structure', () => {
     const stack = new cdk.Stack();
     createPipeline(stack, {
+      pipelineName: 'MyPipeline',
       agents: { troubleshooting: { enabled: true } },
     });
     const template = Template.fromStack(stack);
@@ -253,6 +270,7 @@ describe('Pipeline Troubleshooting Agent', () => {
   test('agent role has DeletionPolicy Delete and bucket has DeletionPolicy Retain', () => {
     const stack = new cdk.Stack();
     createPipeline(stack, {
+      pipelineName: 'MyPipeline',
       agents: { troubleshooting: { enabled: true } },
     });
     const template = Template.fromStack(stack);

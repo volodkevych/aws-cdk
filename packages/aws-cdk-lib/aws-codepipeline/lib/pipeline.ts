@@ -277,6 +277,9 @@ export interface TroubleshootingAgentProps {
    * - An IAM role with scoped inline policies and the
    *   `AWSCodePipelineTroubleshootingAgentAccess` managed policy
    *
+   * Requires `pipelineName` to be set on the Pipeline, because the agent role's
+   * trust policy needs to be scoped per pipeline.
+   *
    * Note: The agent results bucket uses `RemovalPolicy.RETAIN`. If you disable
    * and re-enable the agent, a new bucket is created — the old one remains in
    * your account. Old buckets have a 90-day lifecycle rule and can be identified
@@ -750,12 +753,12 @@ export class Pipeline extends PipelineBase {
       throw new ValidationError(`${props.executionMode} execution mode can only be used with V2 pipelines, \`PipelineType.V2\` must be specified for \`pipelineType\``, this);
     }
 
-    // pipelineName is required to be set if troubleshooting agent is enabled -
-    // it's needed to create agent role
-    const pipelineName = props.pipelineName
-      ?? (props.agents?.troubleshooting?.enabled
-        ? Names.uniqueResourceName(this, { separator: '-', maxLength: 100, allowedSpecialCharacters: '._-' })
-        : undefined);
+    // When the troubleshooting agent is enabled, a concrete pipeline name is required
+    // to scope the agent role's trust policy (SourceArn condition) and CloudWatch Logs
+    // ARN per pipeline, without creating a circular dependency between the Pipeline and AgentRole.
+    if (props.agents?.troubleshooting?.enabled && !props.pipelineName) {
+      throw new ValidationError("'pipelineName' is required when the troubleshooting agent is enabled, because the agent role's trust policy needs to be scoped per pipeline", this);
+    }
 
     this.codePipeline = new CfnPipeline(this, 'Resource', {
       artifactStore: Lazy.any({ produce: () => this.renderArtifactStoreProperty() }),
@@ -768,7 +771,7 @@ export class Pipeline extends PipelineBase {
       variables: Lazy.any({ produce: () => this.renderVariables() }, { omitEmptyArray: true }),
       triggers: Lazy.any({ produce: () => this.renderTriggers() }, { omitEmptyArray: true }),
       executionMode: props.executionMode,
-      name: pipelineName,
+      name: this.physicalName,
     });
 
     // this will produce a DependsOn for both the role and the policy resources.
@@ -777,7 +780,7 @@ export class Pipeline extends PipelineBase {
     // Apply PipelineAgents property override when agent is enabled
     // TODO: Update when CFN is updated
     if (props.agents?.troubleshooting?.enabled) {
-      this.setupTroubleshootingAgent(pipelineName!);
+      this.setupTroubleshootingAgent(this.physicalName);
       this.codePipeline.addPropertyOverride('PipelineAgents', Lazy.any({
         produce: () => this.renderPipelineAgents(),
       }));
@@ -953,7 +956,6 @@ export class Pipeline extends PipelineBase {
 
   private setupTroubleshootingAgent(pipelineName: string): void {
     this.agentResultsBucket = new s3.Bucket(this, 'AgentResultsBucket', {
-      bucketName: PhysicalName.GENERATE_IF_NEEDED,
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true,
@@ -979,7 +981,6 @@ export class Pipeline extends PipelineBase {
     });
 
     this.agentRole = new iam.Role(this, 'AgentRole', {
-      roleName: PhysicalName.GENERATE_IF_NEEDED,
       assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com', {
         conditions: {
           StringEquals: {

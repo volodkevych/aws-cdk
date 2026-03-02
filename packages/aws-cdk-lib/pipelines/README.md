@@ -1848,6 +1848,7 @@ resources (S3 bucket and IAM role).
 declare const synth: pipelines.ShellStep;
 
 const pipeline = new pipelines.CodePipeline(this, 'Pipeline', {
+  pipelineName: 'my-pipeline',
   synth,
   agents: {
     troubleshooting: {
@@ -1857,7 +1858,8 @@ const pipeline = new pipelines.CodePipeline(this, 'Pipeline', {
 });
 ```
 
-> **Note:** The `agents` property cannot be set when providing an existing pipeline via `codePipeline`.
+> **Note:** `pipelineName` is required when the troubleshooting agent is enabled.
+> The `agents` property cannot be set when providing an existing pipeline via `codePipeline`.
 
 For details on the resources created and bucket retention behavior, see the
 [Troubleshooting Agent](../aws-codepipeline/README.md#troubleshooting-agent) section

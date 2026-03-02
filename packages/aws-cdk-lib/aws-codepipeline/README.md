@@ -831,11 +831,15 @@ execution failures. When enabled, CDK creates the following resources:
 - An S3 bucket for storing agent troubleshooting results
 - An IAM role with scoped permissions for agent execution
 
+> **Note:** `pipelineName` is required when the troubleshooting agent is enabled, because the
+> agent role's trust policy needs to be scoped per pipeline.
+
 ```ts
 declare const sourceAction: codepipeline_actions.S3SourceAction;
 declare const buildAction: codepipeline_actions.CodeBuildAction;
 
 new codepipeline.Pipeline(this, 'Pipeline', {
+  pipelineName: 'my-pipeline',
   stages: [
     {
       stageName: 'Source',

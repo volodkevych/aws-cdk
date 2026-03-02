@@ -18,6 +18,7 @@ describe('L3 CodePipeline troubleshooting agent pass-through', () => {
   test('agent property passes through to L2 — agent resources present in synthesized template', () => {
     const pipelineStack = new cdk.Stack(app, 'PipelineStack', { env: PIPELINE_ENV });
     const pipeline = new CodePipeline(pipelineStack, 'Pipeline', {
+      pipelineName: 'MyPipeline',
       synth: new ShellStep('Synth', {
         input: CodePipelineSource.gitHub('test/test', 'main'),
         commands: ['npx cdk synth'],
