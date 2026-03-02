@@ -1837,6 +1837,32 @@ const pipeline = new pipelines.CodePipeline(this, 'Pipeline', {
 });
 ```
 
+## Troubleshooting Agent
+
+You can enable the CodePipeline troubleshooting agent on a CDK Pipeline to get automated
+diagnosis of pipeline execution failures. This passes the `agents`
+configuration through to the underlying L2 `Pipeline` construct, which creates the required
+resources (S3 bucket and IAM role).
+
+```ts
+declare const synth: pipelines.ShellStep;
+
+const pipeline = new pipelines.CodePipeline(this, 'Pipeline', {
+  synth,
+  agents: {
+    troubleshooting: {
+      enabled: true,
+    },
+  },
+});
+```
+
+> **Note:** The `agents` property cannot be set when providing an existing pipeline via `codePipeline`.
+
+For details on the resources created and bucket retention behavior, see the
+[Troubleshooting Agent](../aws-codepipeline/README.md#troubleshooting-agent) section
+in the L2 Pipeline documentation.
+
 ## Migrating a pipeline type from V1 to V2
 
 To migrate your pipeline type from V1 to V2, you just need to update the `pipelineType` property to `PipelineType.V2`.
