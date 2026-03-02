@@ -826,7 +826,7 @@ new codepipeline.Pipeline(this, 'Pipeline', {
 ## Troubleshooting Agent
 
 You can enable the CodePipeline troubleshooting agent to get automated diagnosis of pipeline
-execution failures powered by Amazon Q. When enabled, CDK creates the following resources:
+execution failures. When enabled, CDK creates the following resources:
 
 - An S3 bucket for storing agent troubleshooting results
 - An IAM role with scoped permissions for agent execution
