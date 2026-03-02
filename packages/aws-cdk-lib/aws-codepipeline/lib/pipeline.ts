@@ -31,6 +31,7 @@ import {
   ArnFormat,
   BootstraplessSynthesizer,
   DefaultStackSynthesizer,
+  Duration,
   FeatureFlags,
   Lazy,
   Names,
@@ -39,6 +40,7 @@ import {
   Resource,
   Stack,
   Stage as CdkStage,
+  Tags,
   Token,
   ValidationError,
 } from '../../core';
@@ -260,6 +262,47 @@ export enum ExecutionMode {
   PARALLEL = 'PARALLEL',
 }
 
+/**
+ * Configuration for the CodePipeline troubleshooting agent.
+ *
+ * The troubleshooting agent automatically diagnoses pipeline failures
+ * and provides step-by-step recommendations.
+ */
+export interface TroubleshootingAgentProps {
+  /**
+   * Whether the troubleshooting agent is enabled for this pipeline.
+   *
+   * When enabled, CDK creates:
+   * - An S3 bucket for storing agent troubleshooting results (retained on deletion)
+   * - An IAM role with scoped inline policies and the
+   *   `AWSCodePipelineTroubleshootingAgentAccess` managed policy
+   *
+   * Note: The agent results bucket uses `RemovalPolicy.RETAIN`. If you disable
+   * and re-enable the agent, a new bucket is created — the old one remains in
+   * your account. Old buckets have a 90-day lifecycle rule and can be identified
+   * by the `aws-cdk:purpose=AgentTroubleshooting` tag. You can manually delete
+   * them if no longer needed.
+   *
+   * @default false
+   */
+  readonly enabled: boolean;
+}
+
+/**
+ * Configuration for pipeline agents.
+ *
+ * Pipeline agents provide automated capabilities for your pipeline,
+ * such as troubleshooting failed executions.
+ */
+export interface PipelineAgentsProps {
+  /**
+   * Configuration for the troubleshooting agent.
+   *
+   * @default - Troubleshooting agent is disabled
+   */
+  readonly troubleshooting?: TroubleshootingAgentProps;
+}
+
 export interface PipelineProps {
   /**
    * The S3 bucket used by this Pipeline to store artifacts.
@@ -390,6 +433,13 @@ export interface PipelineProps {
    * @default - false
    */
   readonly usePipelineRoleForActions?: boolean;
+
+  /**
+   * Configuration for pipeline agents.
+   *
+   * @default - No agents are enabled
+   */
+  readonly agents?: PipelineAgentsProps;
 }
 
 abstract class PipelineBase extends Resource implements IPipeline {
@@ -587,6 +637,8 @@ export class Pipeline extends PipelineBase {
   private readonly usePipelineRoleForActions: boolean;
   private readonly variables = new Array<Variable>();
   private readonly triggers = new Array<Trigger>();
+  private agentResultsBucket?: s3.IBucket;
+  private agentRole?: iam.IRole;
 
   /**
    * ARN of this pipeline
@@ -698,6 +750,13 @@ export class Pipeline extends PipelineBase {
       throw new ValidationError(`${props.executionMode} execution mode can only be used with V2 pipelines, \`PipelineType.V2\` must be specified for \`pipelineType\``, this);
     }
 
+    // pipelineName is required to be set if troubleshooting agent is enabled -
+    // it's needed to create agent role
+    const pipelineName = props.pipelineName
+      ?? (props.agents?.troubleshooting?.enabled
+        ? Names.uniqueResourceName(this, { separator: '-', maxLength: 100, allowedSpecialCharacters: '._-' })
+        : undefined);
+
     this.codePipeline = new CfnPipeline(this, 'Resource', {
       artifactStore: Lazy.any({ produce: () => this.renderArtifactStoreProperty() }),
       artifactStores: Lazy.any({ produce: () => this.renderArtifactStoresProperty() }),
@@ -709,11 +768,20 @@ export class Pipeline extends PipelineBase {
       variables: Lazy.any({ produce: () => this.renderVariables() }, { omitEmptyArray: true }),
       triggers: Lazy.any({ produce: () => this.renderTriggers() }, { omitEmptyArray: true }),
       executionMode: props.executionMode,
-      name: this.physicalName,
+      name: pipelineName,
     });
 
     // this will produce a DependsOn for both the role and the policy resources.
     this.codePipeline.node.addDependency(this.role);
+
+    // Apply PipelineAgents property override when agent is enabled
+    // TODO: Update when CFN is updated
+    if (props.agents?.troubleshooting?.enabled) {
+      this.setupTroubleshootingAgent(pipelineName!);
+      this.codePipeline.addPropertyOverride('PipelineAgents', Lazy.any({
+        produce: () => this.renderPipelineAgents(),
+      }));
+    }
 
     this.artifactBucket.grantReadWrite(this.role);
     this.crossRegionBucketsPassed = !!props.crossRegionReplicationBuckets;
@@ -881,6 +949,105 @@ export class Pipeline extends PipelineBase {
       actionRole,
       actionRegion: crossRegionInfo.region,
     });
+  }
+
+  private setupTroubleshootingAgent(pipelineName: string): void {
+    this.agentResultsBucket = new s3.Bucket(this, 'AgentResultsBucket', {
+      bucketName: PhysicalName.GENERATE_IF_NEEDED,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      versioned: false,
+      removalPolicy: RemovalPolicy.RETAIN,
+      lifecycleRules: [{
+        expiration: Duration.days(90),
+        id: 'DeleteOldTroubleshootingData',
+      }],
+    });
+
+    Tags.of(this.agentResultsBucket).add('aws-cdk:service', 'CodePipeline');
+    Tags.of(this.agentResultsBucket).add('aws-cdk:purpose', 'AgentTroubleshooting');
+    Tags.of(this.agentResultsBucket).add('aws-cdk:managed-by', 'CDK');
+
+    // Build trust policy conditions with both SourceAccount and SourceArn.
+    // The pipeline name is always a concrete string when the agent is enabled
+    // (either user-provided or CDK-generated), so we can construct the pipeline
+    // ARN without referencing the CfnPipeline resource, avoiding a circular dependency.
+    const pipelineArnForCondition = Stack.of(this).formatArn({
+      service: 'codepipeline',
+      resource: pipelineName,
+    });
+
+    this.agentRole = new iam.Role(this, 'AgentRole', {
+      roleName: PhysicalName.GENERATE_IF_NEEDED,
+      assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com', {
+        conditions: {
+          StringEquals: {
+            'aws:SourceAccount': Stack.of(this).account,
+            'aws:SourceArn': pipelineArnForCondition,
+          },
+        },
+      }),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('AWSCodePipelineTroubleshootingAgentAccess'),
+      ],
+    });
+    this.agentRole.applyRemovalPolicy(RemovalPolicy.DESTROY);
+
+    // S3 write access to agent results bucket
+    this.agentRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'S3BucketWriteAccess',
+      actions: ['s3:PutObject', 's3:PutObjectTagging'],
+      resources: [this.agentResultsBucket.bucketArn, `${this.agentResultsBucket.bucketArn}/*`],
+      conditions: {
+        StringEquals: { 'aws:ResourceAccount': Stack.of(this).account },
+      },
+    }));
+
+    // S3 read access to pipeline artifact bucket
+    this.agentRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'S3BucketReadOnlyAccess',
+      actions: ['s3:GetObject', 's3:GetObjectTagging', 's3:ListBucket'],
+      resources: [this.artifactBucket.bucketArn, `${this.artifactBucket.bucketArn}/*`],
+      conditions: {
+        StringEquals: { 'aws:ResourceAccount': Stack.of(this).account },
+      },
+    }));
+
+    // CloudWatch Logs write access
+    this.agentRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'CloudWatchLogsWriteAccess',
+      actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'logs',
+          resource: 'log-group',
+          resourceName: `/aws/codepipeline/${pipelineName}/troubleshooting`,
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+        }),
+        Stack.of(this).formatArn({
+          service: 'logs',
+          resource: 'log-group',
+          resourceName: `/aws/codepipeline/${pipelineName}/troubleshooting:log-stream:*`,
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+        }),
+      ],
+    }));
+  }
+
+  private renderPipelineAgents(): any[] | undefined {
+    if (!this.agentResultsBucket || !this.agentRole) {
+      return undefined;
+    }
+    return [{
+      agentType: 'TROUBLESHOOTING',
+      enabled: true,
+      agentArtifactStore: {
+        location: this.agentResultsBucket.bucketName,
+      },
+      roleArn: this.agentRole.roleArn,
+      qEndpointRegion: 'us-east-1',
+    }];
   }
 
   /**
