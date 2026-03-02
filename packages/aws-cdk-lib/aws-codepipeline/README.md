@@ -823,6 +823,43 @@ new codepipeline.Pipeline(this, 'Pipeline', {
 });
 ```
 
+## Troubleshooting Agent
+
+You can enable the CodePipeline troubleshooting agent to get automated diagnosis of pipeline
+execution failures powered by Amazon Q. When enabled, CDK creates the following resources:
+
+- An S3 bucket for storing agent troubleshooting results
+- An IAM role with scoped permissions for agent execution
+
+```ts
+declare const sourceAction: codepipeline_actions.S3SourceAction;
+declare const buildAction: codepipeline_actions.CodeBuildAction;
+
+new codepipeline.Pipeline(this, 'Pipeline', {
+  stages: [
+    {
+      stageName: 'Source',
+      actions: [sourceAction],
+    },
+    {
+      stageName: 'Build',
+      actions: [buildAction],
+    },
+  ],
+  agents: {
+    troubleshooting: {
+      enabled: true,
+    },
+  },
+});
+```
+
+The agent results bucket is created with `RemovalPolicy.RETAIN`. If you disable and later
+re-enable the agent, a new bucket is created — the old one remains in your account. Old
+retained buckets have a 90-day lifecycle rule that automatically expires objects, and can be
+identified by the `aws-cdk:purpose=AgentTroubleshooting` tag. These retained buckets are
+safe to delete once you no longer need the historical troubleshooting data.
+
 ## Stage Level Condition
 
 Conditions are used for specific types of expressions and each has specific options for results available as follows:
