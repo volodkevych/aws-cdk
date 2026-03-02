@@ -272,6 +272,15 @@ export interface CodePipelineProps {
    */
   readonly artifactBucket?: s3.IBucket;
   /**
+   * Configuration for pipeline agents.
+   *
+   * Cannot be set if an existing `codePipeline` is provided.
+   *
+   * @default - No agents are enabled
+   */
+  readonly agents?: cp.PipelineAgentsProps;
+
+  /**
    * A map of region to S3 bucket name used for cross-region CodePipeline.
    * For every Action that you specify targeting a different region than the Pipeline itself,
    * if you don't provide an explicit Bucket for that region using this property,
@@ -504,6 +513,9 @@ export class CodePipeline extends PipelineBase {
       if (this.props.artifactBucket !== undefined) {
         throw new ValidationError('Cannot set \'artifactBucket\' if an existing CodePipeline is given using \'codePipeline\'', this);
       }
+      if (this.props.agents !== undefined) {
+        throw new ValidationError('Cannot set \'agents\' if an existing CodePipeline is given using \'codePipeline\'', this);
+      }
 
       this._pipeline = this.props.codePipeline;
     } else {
@@ -524,6 +536,7 @@ export class CodePipeline extends PipelineBase {
         enableKeyRotation: this.props.enableKeyRotation,
         artifactBucket: this.props.artifactBucket,
         usePipelineRoleForActions: this.usePipelineRoleForActions,
+        agents: this.props.agents,
       });
     }
 
