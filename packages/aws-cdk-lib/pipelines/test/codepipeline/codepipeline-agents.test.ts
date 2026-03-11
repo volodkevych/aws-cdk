@@ -269,3 +269,60 @@ describe('L3 CodePipeline troubleshooting agent - Custom Configuration Pass-Thro
     });
   });
 });
+
+describe('L3 CodePipeline troubleshooting agent - P1 Property Tests', () => {
+  // Property 13: L3 pass-through produces equivalent agent resources
+  test('Property 13: L3 pass-through produces equivalent agent resources for all config combos', () => {
+    const customRoleArb = fc.boolean();
+    const customBucketArb = fc.boolean();
+    const kmsKeyArb = fc.boolean();
+    const qRegionArb = fc.constantFrom(QEndpointRegion.US_EAST_1, QEndpointRegion.EU_CENTRAL_1);
+
+    fc.assert(
+      fc.property(pipelineNameArb, customRoleArb, customBucketArb, kmsKeyArb, qRegionArb,
+        (name, useCustomRole, useCustomBucket, useKms, qRegion) => {
+          const testApp = new TestApp();
+          try {
+            const pipelineStack = new cdk.Stack(testApp, 'PipelineStack', { env: PIPELINE_ENV });
+            const role = useCustomRole ? new iam.Role(pipelineStack, 'CustomRole', {
+              assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com'),
+            }) : undefined;
+            const bucket = useCustomBucket ? new s3.Bucket(pipelineStack, 'CustomBucket') : undefined;
+            const key = useKms ? new kms.Key(pipelineStack, 'MyKey') : undefined;
+
+            const pipeline = new CodePipeline(pipelineStack, 'Pipeline', {
+              pipelineName: name,
+              synth: new ShellStep('Synth', {
+                input: CodePipelineSource.gitHub('test/test', 'main'),
+                commands: ['npx cdk synth'],
+              }),
+              agents: {
+                troubleshooting: {
+                  enabled: true,
+                  role,
+                  agentResultsBucket: bucket,
+                  agentResultsBucketEncryptionKey: key,
+                  qEndpointRegion: qRegion,
+                },
+              },
+            });
+            pipeline.buildPipeline();
+
+            const template = Template.fromStack(pipelineStack);
+            template.hasResourceProperties('AWS::CodePipeline::Pipeline', {
+              PipelineAgents: Match.arrayWith([
+                Match.objectLike({
+                  agentType: 'TROUBLESHOOTING',
+                  enabled: true,
+                  qEndpointRegion: qRegion,
+                }),
+              ]),
+            });
+          } finally {
+            testApp.cleanup();
+          }
+        }),
+      { numRuns: 10 },
+    );
+  });
+});
