@@ -263,6 +263,16 @@ export enum ExecutionMode {
 }
 
 /**
+ * Supported AWS regions for the Amazon Q endpoint used by the troubleshooting agent.
+ */
+export enum QEndpointRegion {
+  /** US East (N. Virginia) */
+  US_EAST_1 = 'us-east-1',
+  /** Europe (Frankfurt) */
+  EU_CENTRAL_1 = 'eu-central-1',
+}
+
+/**
  * Configuration for the CodePipeline troubleshooting agent.
  *
  * The troubleshooting agent automatically diagnoses pipeline failures
@@ -289,6 +299,46 @@ export interface TroubleshootingAgentProps {
    * @default false
    */
   readonly enabled: boolean;
+
+  /**
+   * An existing IAM role for the troubleshooting agent to use.
+   *
+   * When provided, CDK will not create a default agent role and will not
+   * attach any policies to this role. You are responsible for granting
+   * the necessary permissions.
+   *
+   * @default - A new role is created with scoped permissions
+   */
+  readonly role?: iam.IRole;
+
+  /**
+   * An existing S3 bucket for storing agent troubleshooting results.
+   *
+   * When provided, CDK will not create a default agent results bucket.
+   * You are responsible for configuring encryption, lifecycle, and access policies.
+   *
+   * @default - A new bucket is created with SSE-S3, 90-day lifecycle, and RETAIN removal policy
+   */
+  readonly agentResultsBucket?: s3.IBucket;
+
+  /**
+   * A KMS key used to encrypt the agent results bucket.
+   *
+   * When provided with the default role (no custom `role`), CDK grants
+   * KMS encrypt permissions (`kms:Encrypt`, `kms:GenerateDataKey`,
+   * `kms:ReEncryptFrom`, `kms:ReEncryptTo`, `kms:DescribeKey`) to the
+   * default agent role. Ignored when a custom `role` is provided.
+   *
+   * @default - No KMS permissions are added (SSE-S3 is used for the default bucket)
+   */
+  readonly agentResultsBucketEncryptionKey?: kms.IKey;
+
+  /**
+   * The AWS region for the Amazon Q endpoint.
+   *
+   * @default QEndpointRegion.US_EAST_1
+   */
+  readonly qEndpointRegion?: QEndpointRegion;
 }
 
 /**
@@ -642,6 +692,7 @@ export class Pipeline extends PipelineBase {
   private readonly triggers = new Array<Trigger>();
   private agentResultsBucket?: s3.IBucket;
   private agentRole?: iam.IRole;
+  private agentQEndpointRegion?: string;
 
   /**
    * ARN of this pipeline
@@ -760,6 +811,11 @@ export class Pipeline extends PipelineBase {
       throw new ValidationError("'pipelineName' is required when the troubleshooting agent is enabled, because the agent role's trust policy needs to be scoped per pipeline", this);
     }
 
+    if (props.agents?.troubleshooting?.qEndpointRegion !== undefined
+      && !Object.values(QEndpointRegion).includes(props.agents.troubleshooting.qEndpointRegion)) {
+      throw new ValidationError(`Unsupported Q endpoint region: '${props.agents.troubleshooting.qEndpointRegion}'. Supported values: ${Object.values(QEndpointRegion).join(', ')}`, this);
+    }
+
     this.codePipeline = new CfnPipeline(this, 'Resource', {
       artifactStore: Lazy.any({ produce: () => this.renderArtifactStoreProperty() }),
       artifactStores: Lazy.any({ produce: () => this.renderArtifactStoresProperty() }),
@@ -780,7 +836,7 @@ export class Pipeline extends PipelineBase {
     // Apply PipelineAgents property override when agent is enabled
     // TODO: Update when CFN is updated
     if (props.agents?.troubleshooting?.enabled) {
-      this.setupTroubleshootingAgent(this.physicalName);
+      this.setupTroubleshootingAgent(this.physicalName, props.agents.troubleshooting);
       this.codePipeline.addPropertyOverride('PipelineAgents', Lazy.any({
         produce: () => this.renderPipelineAgents(),
       }));
@@ -954,91 +1010,110 @@ export class Pipeline extends PipelineBase {
     });
   }
 
-  private setupTroubleshootingAgent(pipelineName: string): void {
-    this.agentResultsBucket = new s3.Bucket(this, 'AgentResultsBucket', {
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      enforceSSL: true,
-      versioned: false,
-      removalPolicy: RemovalPolicy.RETAIN,
-      lifecycleRules: [{
-        expiration: Duration.days(90),
-        id: 'DeleteOldTroubleshootingData',
-      }],
-    });
+  private setupTroubleshootingAgent(pipelineName: string, agentProps: TroubleshootingAgentProps): void {
+    // Store effective Q endpoint region
+    this.agentQEndpointRegion = agentProps.qEndpointRegion ?? QEndpointRegion.US_EAST_1;
 
-    Tags.of(this.agentResultsBucket).add('aws-cdk:service', 'CodePipeline');
-    Tags.of(this.agentResultsBucket).add('aws-cdk:purpose', 'AgentTroubleshooting');
-    Tags.of(this.agentResultsBucket).add('aws-cdk:managed-by', 'CDK');
+    // Use custom bucket or create default
+    if (agentProps.agentResultsBucket) {
+      this.agentResultsBucket = agentProps.agentResultsBucket;
+    } else {
+      this.agentResultsBucket = new s3.Bucket(this, 'AgentResultsBucket', {
+        encryption: s3.BucketEncryption.S3_MANAGED,
+        blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+        enforceSSL: true,
+        versioned: false,
+        removalPolicy: RemovalPolicy.RETAIN,
+        lifecycleRules: [{
+          expiration: Duration.days(90),
+          id: 'DeleteOldTroubleshootingData',
+        }],
+      });
 
-    // Build trust policy conditions with both SourceAccount and SourceArn.
-    // The pipeline name is always a concrete string when the agent is enabled
-    // (either user-provided or CDK-generated), so we can construct the pipeline
-    // ARN without referencing the CfnPipeline resource, avoiding a circular dependency.
-    const pipelineArnForCondition = Stack.of(this).formatArn({
-      service: 'codepipeline',
-      resource: pipelineName,
-    });
+      Tags.of(this.agentResultsBucket).add('aws-cdk:service', 'CodePipeline');
+      Tags.of(this.agentResultsBucket).add('aws-cdk:purpose', 'AgentTroubleshooting');
+      Tags.of(this.agentResultsBucket).add('aws-cdk:managed-by', 'CDK');
+    }
 
-    this.agentRole = new iam.Role(this, 'AgentRole', {
-      assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com', {
-        conditions: {
-          StringEquals: {
-            'aws:SourceAccount': Stack.of(this).account,
-            'aws:SourceArn': pipelineArnForCondition,
+    // Use custom role or create default
+    if (agentProps.role) {
+      this.agentRole = agentProps.role;
+    } else {
+      // Build trust policy conditions with both SourceAccount and SourceArn.
+      const pipelineArnForCondition = Stack.of(this).formatArn({
+        service: 'codepipeline',
+        resource: pipelineName,
+      });
+
+      this.agentRole = new iam.Role(this, 'AgentRole', {
+        assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com', {
+          conditions: {
+            StringEquals: {
+              'aws:SourceAccount': Stack.of(this).account,
+              'aws:SourceArn': pipelineArnForCondition,
+            },
           },
+        }),
+        managedPolicies: [
+          iam.ManagedPolicy.fromAwsManagedPolicyName('AWSCodePipelineTroubleshootingAgentAccess'),
+        ],
+      });
+      this.agentRole.applyRemovalPolicy(RemovalPolicy.DESTROY);
+
+      // S3 write access to agent results bucket
+      this.agentRole.addToPolicy(new iam.PolicyStatement({
+        sid: 'S3BucketWriteAccess',
+        actions: ['s3:PutObject', 's3:PutObjectTagging'],
+        resources: [this.agentResultsBucket.bucketArn, `${this.agentResultsBucket.bucketArn}/*`],
+        conditions: {
+          StringEquals: { 'aws:ResourceAccount': Stack.of(this).account },
         },
-      }),
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('AWSCodePipelineTroubleshootingAgentAccess'),
-      ],
-    });
-    this.agentRole.applyRemovalPolicy(RemovalPolicy.DESTROY);
+      }));
 
-    // S3 write access to agent results bucket
-    this.agentRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'S3BucketWriteAccess',
-      actions: ['s3:PutObject', 's3:PutObjectTagging'],
-      resources: [this.agentResultsBucket.bucketArn, `${this.agentResultsBucket.bucketArn}/*`],
-      conditions: {
-        StringEquals: { 'aws:ResourceAccount': Stack.of(this).account },
-      },
-    }));
+      // S3 read access to pipeline artifact bucket
+      this.agentRole.addToPolicy(new iam.PolicyStatement({
+        sid: 'S3BucketReadOnlyAccess',
+        actions: ['s3:GetObject', 's3:GetObjectTagging', 's3:ListBucket'],
+        resources: [this.artifactBucket.bucketArn, `${this.artifactBucket.bucketArn}/*`],
+        conditions: {
+          StringEquals: { 'aws:ResourceAccount': Stack.of(this).account },
+        },
+      }));
 
-    // S3 read access to pipeline artifact bucket
-    this.agentRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'S3BucketReadOnlyAccess',
-      actions: ['s3:GetObject', 's3:GetObjectTagging', 's3:ListBucket'],
-      resources: [this.artifactBucket.bucketArn, `${this.artifactBucket.bucketArn}/*`],
-      conditions: {
-        StringEquals: { 'aws:ResourceAccount': Stack.of(this).account },
-      },
-    }));
+      // CloudWatch Logs write access
+      this.agentRole.addToPolicy(new iam.PolicyStatement({
+        sid: 'CloudWatchLogsWriteAccess',
+        actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'logs',
+            resource: 'log-group',
+            resourceName: `/aws/codepipeline/${pipelineName}/troubleshooting`,
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          }),
+          Stack.of(this).formatArn({
+            service: 'logs',
+            resource: 'log-group',
+            resourceName: `/aws/codepipeline/${pipelineName}/troubleshooting:log-stream:*`,
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          }),
+        ],
+      }));
 
-    // CloudWatch Logs write access
-    this.agentRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'CloudWatchLogsWriteAccess',
-      actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'logs',
-          resource: 'log-group',
-          resourceName: `/aws/codepipeline/${pipelineName}/troubleshooting`,
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-        }),
-        Stack.of(this).formatArn({
-          service: 'logs',
-          resource: 'log-group',
-          resourceName: `/aws/codepipeline/${pipelineName}/troubleshooting:log-stream:*`,
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-        }),
-      ],
-    }));
+      // KMS encrypt permissions when a custom encryption key is provided
+      if (agentProps.agentResultsBucketEncryptionKey) {
+        this.agentRole.addToPolicy(new iam.PolicyStatement({
+          sid: 'KMSEncryptAccess',
+          actions: ['kms:Encrypt', 'kms:GenerateDataKey', 'kms:ReEncryptFrom', 'kms:ReEncryptTo', 'kms:DescribeKey'],
+          resources: [agentProps.agentResultsBucketEncryptionKey.keyArn],
+        }));
+      }
+    }
   }
 
-  private renderPipelineAgents(): any[] | undefined {
+  private renderPipelineAgents(): any[] {
     if (!this.agentResultsBucket || !this.agentRole) {
-      return undefined;
+      throw new Error('Troubleshooting agent is enabled but bucket or role is missing. This is a CDK bug.');
     }
     return [{
       agentType: 'TROUBLESHOOTING',
@@ -1047,7 +1122,7 @@ export class Pipeline extends PipelineBase {
         location: this.agentResultsBucket.bucketName,
       },
       roleArn: this.agentRole.roleArn,
-      qEndpointRegion: 'us-east-1',
+      qEndpointRegion: this.agentQEndpointRegion,
     }];
   }
 
