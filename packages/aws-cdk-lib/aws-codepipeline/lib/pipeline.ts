@@ -692,7 +692,7 @@ export class Pipeline extends PipelineBase {
   private readonly triggers = new Array<Trigger>();
   private agentResultsBucket?: s3.IBucket;
   private agentRole?: iam.IRole;
-  private agentQEndpointRegion?: string;
+  private agentQEndpointRegion?: QEndpointRegion;
 
   /**
    * ARN of this pipeline
@@ -811,7 +811,8 @@ export class Pipeline extends PipelineBase {
       throw new ValidationError("'pipelineName' is required when the troubleshooting agent is enabled, because the agent role's trust policy needs to be scoped per pipeline", this);
     }
 
-    if (props.agents?.troubleshooting?.qEndpointRegion !== undefined
+    if (props.agents?.troubleshooting?.enabled
+      && props.agents.troubleshooting.qEndpointRegion !== undefined
       && !Object.values(QEndpointRegion).includes(props.agents.troubleshooting.qEndpointRegion)) {
       throw new ValidationError(`Unsupported Q endpoint region: '${props.agents.troubleshooting.qEndpointRegion}'. Supported values: ${Object.values(QEndpointRegion).join(', ')}`, this);
     }

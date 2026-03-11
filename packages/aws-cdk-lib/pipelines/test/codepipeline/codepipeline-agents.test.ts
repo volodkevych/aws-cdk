@@ -1,6 +1,9 @@
 import * as fc from 'fast-check';
 import { Match, Template } from '../../../assertions';
-import { Pipeline } from '../../../aws-codepipeline';
+import { Pipeline, QEndpointRegion } from '../../../aws-codepipeline';
+import * as iam from '../../../aws-iam';
+import * as kms from '../../../aws-kms';
+import * as s3 from '../../../aws-s3';
 import * as cdk from '../../../core';
 import { CodePipeline, ShellStep, CodePipelineSource } from '../../lib';
 import { TestApp, PIPELINE_ENV } from '../testhelpers';
@@ -164,5 +167,105 @@ describe('L3 CodePipeline troubleshooting agent - Property Tests', () => {
       }),
       { numRuns: 10 },
     );
+  });
+});
+
+describe('L3 CodePipeline troubleshooting agent - Custom Configuration Pass-Through', () => {
+  test('custom role passes through to L2', () => {
+    const pipelineStack = new cdk.Stack(app, 'PipelineStack', { env: PIPELINE_ENV });
+
+    const customRole = new iam.Role(pipelineStack, 'CustomRole', {
+      assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com'),
+    });
+    const pipeline = new CodePipeline(pipelineStack, 'Pipeline', {
+      pipelineName: 'MyPipeline',
+      synth: new ShellStep('Synth', {
+        input: CodePipelineSource.gitHub('test/test', 'main'),
+        commands: ['npx cdk synth'],
+      }),
+      agents: { troubleshooting: { enabled: true, role: customRole } },
+    });
+    pipeline.buildPipeline();
+    const template = Template.fromStack(pipelineStack);
+
+    template.hasResourceProperties('AWS::CodePipeline::Pipeline', {
+      PipelineAgents: Match.arrayWith([
+        Match.objectLike({
+          roleArn: pipelineStack.resolve(customRole.roleArn),
+        }),
+      ]),
+    });
+  });
+
+  test('custom bucket passes through to L2', () => {
+    const pipelineStack = new cdk.Stack(app, 'PipelineStack', { env: PIPELINE_ENV });
+
+    const customBucket = new s3.Bucket(pipelineStack, 'CustomBucket');
+    const pipeline = new CodePipeline(pipelineStack, 'Pipeline', {
+      pipelineName: 'MyPipeline',
+      synth: new ShellStep('Synth', {
+        input: CodePipelineSource.gitHub('test/test', 'main'),
+        commands: ['npx cdk synth'],
+      }),
+      agents: { troubleshooting: { enabled: true, agentResultsBucket: customBucket } },
+    });
+    pipeline.buildPipeline();
+    const template = Template.fromStack(pipelineStack);
+
+    template.hasResourceProperties('AWS::CodePipeline::Pipeline', {
+      PipelineAgents: Match.arrayWith([
+        Match.objectLike({
+          agentArtifactStore: { location: pipelineStack.resolve(customBucket.bucketName) },
+        }),
+      ]),
+    });
+  });
+
+  test('KMS key passes through to L2 — default role has KMS permissions', () => {
+    const pipelineStack = new cdk.Stack(app, 'PipelineStack', { env: PIPELINE_ENV });
+
+    const key = new kms.Key(pipelineStack, 'MyKey');
+    const pipeline = new CodePipeline(pipelineStack, 'Pipeline', {
+      pipelineName: 'MyPipeline',
+      synth: new ShellStep('Synth', {
+        input: CodePipelineSource.gitHub('test/test', 'main'),
+        commands: ['npx cdk synth'],
+      }),
+      agents: { troubleshooting: { enabled: true, agentResultsBucketEncryptionKey: key } },
+    });
+    pipeline.buildPipeline();
+    const template = Template.fromStack(pipelineStack);
+
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Sid: 'KMSEncryptAccess',
+            Resource: pipelineStack.resolve(key.keyArn),
+          }),
+        ]),
+      },
+    });
+  });
+
+  test('Q region passes through to L2', () => {
+    const pipelineStack = new cdk.Stack(app, 'PipelineStack', { env: PIPELINE_ENV });
+
+    const pipeline = new CodePipeline(pipelineStack, 'Pipeline', {
+      pipelineName: 'MyPipeline',
+      synth: new ShellStep('Synth', {
+        input: CodePipelineSource.gitHub('test/test', 'main'),
+        commands: ['npx cdk synth'],
+      }),
+      agents: { troubleshooting: { enabled: true, qEndpointRegion: QEndpointRegion.EU_CENTRAL_1 } },
+    });
+    pipeline.buildPipeline();
+    const template = Template.fromStack(pipelineStack);
+
+    template.hasResourceProperties('AWS::CodePipeline::Pipeline', {
+      PipelineAgents: Match.arrayWith([
+        Match.objectLike({ qEndpointRegion: 'eu-central-1' }),
+      ]),
+    });
   });
 });

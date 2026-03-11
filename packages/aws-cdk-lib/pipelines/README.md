@@ -1858,6 +1858,27 @@ const pipeline = new pipelines.CodePipeline(this, 'Pipeline', {
 });
 ```
 
+Custom configuration (role, bucket, KMS key, Q endpoint region) is also supported:
+
+```ts
+declare const synth: pipelines.ShellStep;
+declare const customRole: iam.IRole;
+declare const customBucket: s3.IBucket;
+
+const pipeline = new pipelines.CodePipeline(this, 'Pipeline', {
+  pipelineName: 'my-pipeline',
+  synth,
+  agents: {
+    troubleshooting: {
+      enabled: true,
+      role: customRole,
+      agentResultsBucket: customBucket,
+      qEndpointRegion: codepipeline.QEndpointRegion.EU_CENTRAL_1,
+    },
+  },
+});
+```
+
 > **Note:** `pipelineName` is required when the troubleshooting agent is enabled.
 > The `agents` property cannot be set when providing an existing pipeline via `codePipeline`.
 

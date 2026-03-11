@@ -864,6 +864,48 @@ retained buckets have a 90-day lifecycle rule that automatically expires objects
 identified by the `aws-cdk:purpose=AgentTroubleshooting` tag. These retained buckets are
 safe to delete once you no longer need the historical troubleshooting data.
 
+### Custom Agent Configuration
+
+You can provide your own IAM role, S3 bucket, KMS encryption key, or Amazon Q endpoint region:
+
+```ts
+declare const sourceAction: codepipeline_actions.S3SourceAction;
+declare const buildAction: codepipeline_actions.CodeBuildAction;
+declare const customRole: iam.IRole;
+declare const customBucket: s3.IBucket;
+declare const encryptionKey: kms.IKey;
+
+new codepipeline.Pipeline(this, 'Pipeline', {
+  pipelineName: 'my-pipeline',
+  stages: [
+    {
+      stageName: 'Source',
+      actions: [sourceAction],
+    },
+    {
+      stageName: 'Build',
+      actions: [buildAction],
+    },
+  ],
+  agents: {
+    troubleshooting: {
+      enabled: true,
+      role: customRole,
+      agentResultsBucket: customBucket,
+      agentResultsBucketEncryptionKey: encryptionKey,
+      qEndpointRegion: codepipeline.QEndpointRegion.EU_CENTRAL_1,
+    },
+  },
+});
+```
+
+When custom resources are provided:
+
+- **Custom role**: CDK does not create a default role and does not attach any policies to the custom role. You are responsible for granting the necessary permissions.
+- **Custom bucket**: CDK does not create a default bucket. You are responsible for configuring encryption, lifecycle, and access policies.
+- **KMS key**: When provided with the default role (no custom `role`), CDK grants KMS encrypt permissions to the default role. Ignored when a custom role is provided.
+- **Q endpoint region**: Available regions are `us-east-1` (default) and `eu-central-1`.
+
 ## Stage Level Condition
 
 Conditions are used for specific types of expressions and each has specific options for results available as follows:

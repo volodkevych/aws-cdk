@@ -2,6 +2,9 @@ import * as fc from 'fast-check';
 import { FakeBuildAction } from './fake-build-action';
 import { FakeSourceAction } from './fake-source-action';
 import { Match, Template } from '../../assertions';
+import * as iam from '../../aws-iam';
+import * as kms from '../../aws-kms';
+import * as s3 from '../../aws-s3';
 import * as cdk from '../../core';
 import * as codepipeline from '../lib';
 
@@ -464,5 +467,316 @@ describe('Pipeline Troubleshooting Agent - Property Tests', () => {
       }),
       { numRuns: 20 },
     );
+  });
+});
+
+// Assertion helpers for P1 tests
+function expectNoAgentRole(template: Template): void {
+  const roles = template.findResources('AWS::IAM::Role');
+  const agentRoles = Object.values(roles).filter((r: any) =>
+    JSON.stringify(r.Properties?.AssumeRolePolicyDocument).includes('aws:SourceAccount'),
+  );
+  expect(agentRoles).toHaveLength(0);
+}
+
+function expectNoAgentBucket(template: Template): void {
+  const buckets = template.findResources('AWS::S3::Bucket');
+  const agentBuckets = Object.values(buckets).filter((b: any) =>
+    b.Properties?.LifecycleConfiguration?.Rules?.some((r: any) => r.Id === 'DeleteOldTroubleshootingData'),
+  );
+  expect(agentBuckets).toHaveLength(0);
+}
+
+function expectNoPolicySid(template: Template, sid: string): void {
+  const policies = template.findResources('AWS::IAM::Policy');
+  for (const [, policy] of Object.entries(policies)) {
+    const statements = (policy as any).Properties?.PolicyDocument?.Statement ?? [];
+    for (const stmt of statements) {
+      expect(stmt.Sid).not.toEqual(sid);
+    }
+  }
+}
+
+describe('Pipeline Troubleshooting Agent - Custom Role', () => {
+  test('custom role provided — no default agent role, PipelineAgents uses custom role ARN', () => {
+    const stack = new cdk.Stack();
+    const customRole = new iam.Role(stack, 'CustomRole', {
+      assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com'),
+    });
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: { troubleshooting: { enabled: true, role: customRole } },
+    });
+    const template = Template.fromStack(stack);
+
+    // No AgentRole created (only pipeline role + custom role)
+    // The agent role would have SourceAccount condition — verify it's absent
+    template.hasResourceProperties('AWS::CodePipeline::Pipeline', {
+      PipelineAgents: Match.arrayWith([
+        Match.objectLike({
+          roleArn: stack.resolve(customRole.roleArn),
+        }),
+      ]),
+    });
+  });
+
+  test('custom role provided — no policies added to custom role', () => {
+    const stack = new cdk.Stack();
+
+    const customRole = new iam.Role(stack, 'CustomRole', {
+      assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com'),
+    });
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: { troubleshooting: { enabled: true, role: customRole } },
+    });
+    const template = Template.fromStack(stack);
+
+    expectNoPolicySid(template, 'S3BucketWriteAccess');
+    expectNoPolicySid(template, 'S3BucketReadOnlyAccess');
+    expectNoPolicySid(template, 'CloudWatchLogsWriteAccess');
+  });
+
+  test('custom role + KMS key — no KMS permissions on custom role', () => {
+    const stack = new cdk.Stack();
+
+    const customRole = new iam.Role(stack, 'CustomRole', {
+      assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com'),
+    });
+    const key = new kms.Key(stack, 'MyKey');
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: { troubleshooting: { enabled: true, role: customRole, agentResultsBucketEncryptionKey: key } },
+    });
+    const template = Template.fromStack(stack);
+
+    expectNoPolicySid(template, 'KMSEncryptAccess');
+  });
+});
+
+describe('Pipeline Troubleshooting Agent - Custom Bucket', () => {
+  test('custom bucket provided — no default agent bucket, PipelineAgents uses custom bucket', () => {
+    const stack = new cdk.Stack();
+
+    const customBucket = new s3.Bucket(stack, 'CustomBucket');
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: { troubleshooting: { enabled: true, agentResultsBucket: customBucket } },
+    });
+    const template = Template.fromStack(stack);
+
+    // 2 buckets: artifact + custom (no default agent bucket with lifecycle)
+    template.resourceCountIs('AWS::S3::Bucket', 2);
+    // No bucket with the agent lifecycle rule
+    expectNoAgentBucket(template);
+
+    template.hasResourceProperties('AWS::CodePipeline::Pipeline', {
+      PipelineAgents: Match.arrayWith([
+        Match.objectLike({
+          agentArtifactStore: { location: stack.resolve(customBucket.bucketName) },
+        }),
+      ]),
+    });
+  });
+
+  test('custom bucket + default role — S3 write scoped to custom bucket ARN', () => {
+    const stack = new cdk.Stack();
+
+    const customBucket = new s3.Bucket(stack, 'CustomBucket');
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: { troubleshooting: { enabled: true, agentResultsBucket: customBucket } },
+    });
+    const template = Template.fromStack(stack);
+
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Sid: 'S3BucketWriteAccess',
+            Resource: Match.arrayWith([
+              stack.resolve(customBucket.bucketArn),
+            ]),
+          }),
+        ]),
+      },
+    });
+  });
+});
+
+describe('Pipeline Troubleshooting Agent - KMS Key', () => {
+  test('KMS key + default role — role has KMS encrypt policy with 5 actions', () => {
+    const stack = new cdk.Stack();
+
+    const key = new kms.Key(stack, 'MyKey');
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: { troubleshooting: { enabled: true, agentResultsBucketEncryptionKey: key } },
+    });
+    const template = Template.fromStack(stack);
+
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Sid: 'KMSEncryptAccess',
+            Action: ['kms:Encrypt', 'kms:GenerateDataKey', 'kms:ReEncryptFrom', 'kms:ReEncryptTo', 'kms:DescribeKey'],
+            Resource: stack.resolve(key.keyArn),
+          }),
+        ]),
+      },
+    });
+  });
+
+  test('no KMS key — default role has no KMS permissions', () => {
+    const stack = new cdk.Stack();
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: { troubleshooting: { enabled: true } },
+    });
+    const template = Template.fromStack(stack);
+
+    expectNoPolicySid(template, 'KMSEncryptAccess');
+  });
+});
+
+describe('Pipeline Troubleshooting Agent - Q Endpoint Region', () => {
+  test('QEndpointRegion.US_EAST_1 — PipelineAgents has us-east-1', () => {
+    const stack = new cdk.Stack();
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: { troubleshooting: { enabled: true, qEndpointRegion: codepipeline.QEndpointRegion.US_EAST_1 } },
+    });
+    const template = Template.fromStack(stack);
+
+    template.hasResourceProperties('AWS::CodePipeline::Pipeline', {
+      PipelineAgents: Match.arrayWith([
+        Match.objectLike({ qEndpointRegion: 'us-east-1' }),
+      ]),
+    });
+  });
+
+  test('QEndpointRegion.EU_CENTRAL_1 — PipelineAgents has eu-central-1', () => {
+    const stack = new cdk.Stack();
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: { troubleshooting: { enabled: true, qEndpointRegion: codepipeline.QEndpointRegion.EU_CENTRAL_1 } },
+    });
+    const template = Template.fromStack(stack);
+
+    template.hasResourceProperties('AWS::CodePipeline::Pipeline', {
+      PipelineAgents: Match.arrayWith([
+        Match.objectLike({ qEndpointRegion: 'eu-central-1' }),
+      ]),
+    });
+  });
+
+  test('no qEndpointRegion — defaults to us-east-1', () => {
+    const stack = new cdk.Stack();
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: { troubleshooting: { enabled: true } },
+    });
+    const template = Template.fromStack(stack);
+
+    template.hasResourceProperties('AWS::CodePipeline::Pipeline', {
+      PipelineAgents: Match.arrayWith([
+        Match.objectLike({ qEndpointRegion: 'us-east-1' }),
+      ]),
+    });
+  });
+
+  test('invalid region string — throws ValidationError', () => {
+    const stack = new cdk.Stack();
+    expect(() => {
+      createPipeline(stack, {
+        pipelineName: 'MyPipeline',
+        agents: { troubleshooting: { enabled: true, qEndpointRegion: 'ap-southeast-1' as any } },
+      });
+    }).toThrow(/Unsupported Q endpoint region/);
+  });
+});
+
+describe('Pipeline Troubleshooting Agent - Resource Combinations', () => {
+  test('custom role + custom bucket — no default resources created', () => {
+    const stack = new cdk.Stack();
+
+    const customRole = new iam.Role(stack, 'CustomRole', {
+      assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com'),
+    });
+    const customBucket = new s3.Bucket(stack, 'CustomBucket');
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: { troubleshooting: { enabled: true, role: customRole, agentResultsBucket: customBucket } },
+    });
+    const template = Template.fromStack(stack);
+
+    // 2 buckets: artifact + custom (no default agent bucket)
+    template.resourceCountIs('AWS::S3::Bucket', 2);
+    // No agent-specific lifecycle bucket
+    expectNoAgentBucket(template);
+
+    // No agent-specific role (no role with SourceAccount condition in trust)
+    expectNoAgentRole(template);
+  });
+
+  test('custom role + no custom bucket — default bucket created, no default role', () => {
+    const stack = new cdk.Stack();
+
+    const customRole = new iam.Role(stack, 'CustomRole', {
+      assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com'),
+    });
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: { troubleshooting: { enabled: true, role: customRole } },
+    });
+    const template = Template.fromStack(stack);
+
+    // 2 buckets: artifact + default agent bucket (with lifecycle)
+    template.resourceCountIs('AWS::S3::Bucket', 2);
+    template.hasResource('AWS::S3::Bucket', {
+      Properties: Match.objectLike({
+        LifecycleConfiguration: {
+          Rules: Match.arrayWith([
+            Match.objectLike({ Id: 'DeleteOldTroubleshootingData' }),
+          ]),
+        },
+      }),
+      DeletionPolicy: 'Retain',
+    });
+
+    // No agent-specific role
+    expectNoAgentRole(template);
+  });
+
+  test('all custom + KMS key — no default resources, no modifications to custom role', () => {
+    const stack = new cdk.Stack();
+
+    const customRole = new iam.Role(stack, 'CustomRole', {
+      assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com'),
+    });
+    const customBucket = new s3.Bucket(stack, 'CustomBucket');
+    const key = new kms.Key(stack, 'MyKey');
+    createPipeline(stack, {
+      pipelineName: 'MyPipeline',
+      agents: {
+        troubleshooting: {
+          enabled: true,
+          role: customRole,
+          agentResultsBucket: customBucket,
+          agentResultsBucketEncryptionKey: key,
+        },
+      },
+    });
+    const template = Template.fromStack(stack);
+
+    // No default agent bucket
+    expectNoAgentBucket(template);
+
+    // No agent-specific role
+    expectNoAgentRole(template);
+
+    // No KMS policy (custom role is not modified)
+    expectNoPolicySid(template, 'KMSEncryptAccess');
   });
 });
