@@ -5,7 +5,7 @@ import * as codepipeline from '../../../aws-codepipeline';
 import * as iam from '../../../aws-iam';
 import * as s3 from '../../../aws-s3';
 import * as sns from '../../../aws-sns';
-import { App, SecretValue, Stack } from '../../../core';
+import { App, PhysicalName, SecretValue, Stack } from '../../../core';
 import * as cpactions from '../../lib';
 
 /* eslint-disable @stylistic/quote-props */
@@ -728,6 +728,140 @@ describe('CodeBuild Action', () => {
       const pipelineResource = Object.values(pipelines)[0];
       const buildAction = pipelineResource.Properties.Stages[1].Actions[0];
       expect(buildAction.Configuration.ServiceRoleArnOverride).toBeUndefined();
+    });
+
+    test('feature flag creates role in project account for cross-account pipelines', () => {
+      const app = new App({
+        context: {
+          '@aws-cdk/aws-codepipeline-actions:useServiceRoleOverrideForCodeBuild': true,
+        },
+      });
+
+      const projectStack = new Stack(app, 'ProjectStack', {
+        env: { region: 'us-west-2', account: '111111111111' },
+      });
+      const project = new codebuild.PipelineProject(projectStack, 'Project', {
+        projectName: PhysicalName.GENERATE_IF_NEEDED,
+      });
+
+      const pipelineStack = new Stack(app, 'PipelineStack', {
+        env: { region: 'us-west-2', account: '222222222222' },
+      });
+
+      const sourceOutput = new codepipeline.Artifact();
+      new codepipeline.Pipeline(pipelineStack, 'Pipeline', {
+        stages: [
+          {
+            stageName: 'Source',
+            actions: [new cpactions.CodeStarConnectionsSourceAction({
+              actionName: 'Source',
+              owner: 'my-owner',
+              repo: 'my-repo',
+              output: sourceOutput,
+              connectionArn: 'arn:aws:codestar-connections:us-west-2:111111111111:connection/12345678-abcd-12ab-34cdef5678gh',
+              codeBuildCloneOutput: true,
+            })],
+          },
+          {
+            stageName: 'Build',
+            actions: [new cpactions.CodeBuildAction({
+              actionName: 'Build',
+              project,
+              input: sourceOutput,
+            })],
+          },
+        ],
+      });
+
+      // The override role should be in the project's stack (account 111111111111)
+      const projectTemplate = Template.fromStack(projectStack);
+      projectTemplate.hasResourceProperties('AWS::IAM::Role', {
+        AssumeRolePolicyDocument: {
+          Statement: [
+            Match.objectLike({
+              Principal: { Service: 'codebuild.amazonaws.com' },
+            }),
+          ],
+        },
+      });
+    });
+
+    test('feature flag with multiple inputs uses the Full Clone one', () => {
+      const app = new App({
+        context: {
+          '@aws-cdk/aws-codepipeline-actions:useServiceRoleOverrideForCodeBuild': true,
+        },
+      });
+      const stack = new Stack(app, 'TestStack');
+
+      const sourceOutput1 = new codepipeline.Artifact('Source1');
+      const sourceOutput2 = new codepipeline.Artifact('Source2');
+
+      new codepipeline.Pipeline(stack, 'Pipeline', {
+        stages: [
+          {
+            stageName: 'Source',
+            actions: [
+              new cpactions.CodeStarConnectionsSourceAction({
+                actionName: 'FullCloneSource',
+                owner: 'my-owner',
+                repo: 'my-repo',
+                output: sourceOutput1,
+                connectionArn: 'arn:aws:codestar-connections:us-east-1:123456789012:connection/12345678-abcd-12ab-34cdef5678gh',
+                codeBuildCloneOutput: true,
+              }),
+              new cpactions.S3SourceAction({
+                actionName: 'S3Source',
+                bucket: new s3.Bucket(stack, 'Bucket'),
+                bucketKey: 'key',
+                output: sourceOutput2,
+              }),
+            ],
+          },
+          {
+            stageName: 'Build',
+            actions: [new cpactions.CodeBuildAction({
+              actionName: 'Build',
+              project: new codebuild.PipelineProject(stack, 'MyProject'),
+              input: sourceOutput1,
+              extraInputs: [sourceOutput2],
+            })],
+          },
+        ],
+      });
+
+      const template = Template.fromStack(stack);
+
+      // Should still create the override role using the Full Clone input's metadata
+      template.hasResourceProperties('AWS::CodePipeline::Pipeline', {
+        Stages: Match.arrayWith([
+          Match.objectLike({
+            Name: 'Build',
+            Actions: Match.arrayWith([
+              Match.objectLike({
+                Configuration: Match.objectLike({
+                  ServiceRoleArnOverride: Match.anyValue(),
+                }),
+              }),
+            ]),
+          }),
+        ]),
+      });
+
+      // Verify condition uses the correct repo
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Condition: {
+                StringEquals: {
+                  'codeconnections:FullRepositoryId': 'my-owner/my-repo',
+                },
+              },
+            }),
+          ]),
+        },
+      });
     });
   });
 });
