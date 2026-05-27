@@ -4,6 +4,8 @@ import * as codebuild from '../../../aws-codebuild';
 import * as codepipeline from '../../../aws-codepipeline';
 import * as iam from '../../../aws-iam';
 import * as cdk from '../../../core';
+import { FeatureFlags } from '../../../core';
+import { CODEPIPELINE_CODEBUILD_SERVICE_ROLE_OVERRIDE } from '../../../cx-api';
 import { lit } from '../../../core/lib/private/literal-string';
 import { Action } from '../action';
 import { CodeCommitSourceAction } from '../codecommit/source-action';
@@ -233,6 +235,15 @@ export class CodeBuildAction extends Action {
     let overrideRole: iam.IRole | undefined;
     if (this.props.serviceRoleOverride) {
       overrideRole = this.props.serviceRoleOverride;
+    } else if (FeatureFlags.of(scope).isEnabled(CODEPIPELINE_CODEBUILD_SERVICE_ROLE_OVERRIDE)) {
+      for (const inputArtifact of this.actionProperties.inputs || []) {
+        const connectionArn = inputArtifact.getMetadata(CodeStarConnectionsSourceAction._CONNECTION_ARN_PROPERTY);
+        const fullRepositoryId = inputArtifact.getMetadata(CodeStarConnectionsSourceAction._FULL_REPOSITORY_ID_PROPERTY);
+        if (connectionArn && fullRepositoryId) {
+          overrideRole = this.createServiceRoleOverride(scope, _stage, options, connectionArn, fullRepositoryId);
+          break;
+        }
+      }
     }
 
     if (overrideRole) {
@@ -263,5 +274,116 @@ export class CodeBuildAction extends Action {
     return {
       configuration,
     };
+  }
+
+  private createServiceRoleOverride(
+    scope: Construct,
+    _stage: codepipeline.IStage,
+    options: codepipeline.ActionBindOptions,
+    connectionArn: string,
+    fullRepositoryId: string,
+  ): iam.Role {
+    const pipelineStack = cdk.Stack.of(scope);
+    const projectStack = cdk.Stack.of(this.props.project);
+
+    let role: iam.Role;
+    if (pipelineStack.account !== projectStack.account) {
+      role = new iam.Role(projectStack,
+        `${cdk.Names.nodeUniqueId(_stage.pipeline.node)}-${_stage.stageName}-${this.actionProperties.actionName}-CodeBuildServiceRoleOverride`, {
+          assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
+          roleName: cdk.PhysicalName.GENERATE_IF_NEEDED,
+        });
+    } else {
+      role = new iam.Role(scope, 'CodeBuildServiceRoleOverride', {
+        assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
+      });
+    }
+
+    const stack = cdk.Stack.of(role);
+
+    // Logs
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'logs:CreateLogGroup',
+        'logs:CreateLogStream',
+        'logs:PutLogEvents',
+      ],
+      resources: [
+        stack.formatArn({
+          service: 'logs',
+          resource: 'log-group',
+          resourceName: `/aws/codebuild/${this.props.project.projectName}`,
+          arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+        }),
+        stack.formatArn({
+          service: 'logs',
+          resource: 'log-group',
+          resourceName: `/aws/codebuild/${this.props.project.projectName}:*`,
+          arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+        }),
+      ],
+    }));
+
+    // S3 Artifacts
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        's3:PutObject',
+        's3:GetObject',
+        's3:GetObjectVersion',
+        's3:GetBucketAcl',
+        's3:GetBucketLocation',
+      ],
+      resources: [
+        options.bucket.bucketArn,
+        `${options.bucket.bucketArn}/*`,
+      ],
+    }));
+
+    // CodeConnections with FullRepositoryId condition
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'codeconnections:UseConnection',
+        'codeconnections:GetConnection',
+        'codestar-connections:UseConnection',
+        'codestar-connections:GetConnection',
+      ],
+      resources: [connectionArn],
+      conditions: {
+        StringEquals: {
+          'codeconnections:FullRepositoryId': fullRepositoryId,
+        },
+      },
+    }));
+
+    // Reports
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'codebuild:CreateReportGroup',
+        'codebuild:CreateReport',
+        'codebuild:UpdateReport',
+        'codebuild:BatchPutTestCases',
+        'codebuild:BatchPutCodeCoverages',
+      ],
+      resources: [
+        stack.formatArn({
+          service: 'codebuild',
+          resource: 'report-group',
+          resourceName: `${this.props.project.projectName}-*`,
+        }),
+      ],
+    }));
+
+    // Session Manager
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'ssmmessages:CreateControlChannel',
+        'ssmmessages:CreateDataChannel',
+        'ssmmessages:OpenControlChannel',
+        'ssmmessages:OpenDataChannel',
+      ],
+      resources: ['*'],
+    }));
+
+    return role;
   }
 }

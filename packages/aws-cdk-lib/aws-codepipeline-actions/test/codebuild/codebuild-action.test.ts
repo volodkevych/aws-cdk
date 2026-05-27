@@ -508,5 +508,226 @@ describe('CodeBuild Action', () => {
       const buildAction = pipelineResource.Properties.Stages[1].Actions[0];
       expect(buildAction.Configuration.ServiceRoleArnOverride).toBeUndefined();
     });
+
+    test('feature flag auto-creates scoped role when Full Clone source is detected', () => {
+      const app = new App({
+        context: {
+          '@aws-cdk/aws-codepipeline-actions:useServiceRoleOverrideForCodeBuild': true,
+        },
+      });
+      const stack = new Stack(app, 'TestStack');
+
+      const sourceOutput = new codepipeline.Artifact();
+      new codepipeline.Pipeline(stack, 'Pipeline', {
+        stages: [
+          {
+            stageName: 'Source',
+            actions: [new cpactions.CodeStarConnectionsSourceAction({
+              actionName: 'Source',
+              owner: 'my-owner',
+              repo: 'my-repo',
+              output: sourceOutput,
+              connectionArn: 'arn:aws:codestar-connections:us-east-1:123456789012:connection/12345678-abcd-12ab-34cdef5678gh',
+              codeBuildCloneOutput: true,
+            })],
+          },
+          {
+            stageName: 'Build',
+            actions: [new cpactions.CodeBuildAction({
+              actionName: 'Build',
+              project: new codebuild.PipelineProject(stack, 'MyProject'),
+              input: sourceOutput,
+            })],
+          },
+        ],
+      });
+
+      const template = Template.fromStack(stack);
+
+      // Verify ServiceRoleArnOverride is set in pipeline config
+      template.hasResourceProperties('AWS::CodePipeline::Pipeline', {
+        Stages: Match.arrayWith([
+          Match.objectLike({
+            Name: 'Build',
+            Actions: Match.arrayWith([
+              Match.objectLike({
+                Configuration: Match.objectLike({
+                  ServiceRoleArnOverride: Match.anyValue(),
+                }),
+              }),
+            ]),
+          }),
+        ]),
+      });
+
+      // Verify the auto-created role has CodeBuild trust
+      template.hasResourceProperties('AWS::IAM::Role', {
+        AssumeRolePolicyDocument: {
+          Statement: [
+            Match.objectLike({
+              Action: 'sts:AssumeRole',
+              Effect: 'Allow',
+              Principal: { Service: 'codebuild.amazonaws.com' },
+            }),
+          ],
+        },
+      });
+
+      // Verify the CodeConnections statement has FullRepositoryId condition
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: Match.arrayWith([
+                'codeconnections:UseConnection',
+              ]),
+              Condition: {
+                StringEquals: {
+                  'codeconnections:FullRepositoryId': 'my-owner/my-repo',
+                },
+              },
+              Resource: 'arn:aws:codestar-connections:us-east-1:123456789012:connection/12345678-abcd-12ab-34cdef5678gh',
+            }),
+          ]),
+        },
+      });
+    });
+
+    test('feature flag does nothing when disabled', () => {
+      const app = new App({
+        context: {
+          '@aws-cdk/aws-codepipeline-actions:useServiceRoleOverrideForCodeBuild': false,
+        },
+      });
+      const stack = new Stack(app, 'TestStack');
+
+      const sourceOutput = new codepipeline.Artifact();
+      new codepipeline.Pipeline(stack, 'Pipeline', {
+        stages: [
+          {
+            stageName: 'Source',
+            actions: [new cpactions.CodeStarConnectionsSourceAction({
+              actionName: 'Source',
+              owner: 'my-owner',
+              repo: 'my-repo',
+              output: sourceOutput,
+              connectionArn: 'arn:aws:codestar-connections:us-east-1:123456789012:connection/12345678-abcd-12ab-34cdef5678gh',
+              codeBuildCloneOutput: true,
+            })],
+          },
+          {
+            stageName: 'Build',
+            actions: [new cpactions.CodeBuildAction({
+              actionName: 'Build',
+              project: new codebuild.PipelineProject(stack, 'MyProject'),
+              input: sourceOutput,
+            })],
+          },
+        ],
+      });
+
+      const template = Template.fromStack(stack);
+      const pipelines = template.findResources('AWS::CodePipeline::Pipeline');
+      const pipelineResource = Object.values(pipelines)[0];
+      const buildAction = pipelineResource.Properties.Stages[1].Actions[0];
+      expect(buildAction.Configuration.ServiceRoleArnOverride).toBeUndefined();
+    });
+
+    test('explicit prop takes precedence over feature flag', () => {
+      const app = new App({
+        context: {
+          '@aws-cdk/aws-codepipeline-actions:useServiceRoleOverrideForCodeBuild': true,
+        },
+      });
+      const stack = new Stack(app, 'TestStack');
+
+      const overrideRole = new iam.Role(stack, 'MyCustomRole', {
+        assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
+      });
+
+      const sourceOutput = new codepipeline.Artifact();
+      new codepipeline.Pipeline(stack, 'Pipeline', {
+        stages: [
+          {
+            stageName: 'Source',
+            actions: [new cpactions.CodeStarConnectionsSourceAction({
+              actionName: 'Source',
+              owner: 'my-owner',
+              repo: 'my-repo',
+              output: sourceOutput,
+              connectionArn: 'arn:aws:codestar-connections:us-east-1:123456789012:connection/12345678-abcd-12ab-34cdef5678gh',
+              codeBuildCloneOutput: true,
+            })],
+          },
+          {
+            stageName: 'Build',
+            actions: [new cpactions.CodeBuildAction({
+              actionName: 'Build',
+              project: new codebuild.PipelineProject(stack, 'MyProject'),
+              input: sourceOutput,
+              serviceRoleOverride: overrideRole,
+            })],
+          },
+        ],
+      });
+
+      const template = Template.fromStack(stack);
+
+      // Should use the explicitly provided role
+      template.hasResourceProperties('AWS::CodePipeline::Pipeline', {
+        Stages: Match.arrayWith([
+          Match.objectLike({
+            Name: 'Build',
+            Actions: Match.arrayWith([
+              Match.objectLike({
+                Configuration: Match.objectLike({
+                  ServiceRoleArnOverride: { 'Fn::GetAtt': [Match.stringLikeRegexp('MyCustomRole'), 'Arn'] },
+                }),
+              }),
+            ]),
+          }),
+        ]),
+      });
+    });
+
+    test('feature flag does not trigger when input is not from Full Clone source', () => {
+      const app = new App({
+        context: {
+          '@aws-cdk/aws-codepipeline-actions:useServiceRoleOverrideForCodeBuild': true,
+        },
+      });
+      const stack = new Stack(app, 'TestStack');
+
+      const sourceOutput = new codepipeline.Artifact();
+      new codepipeline.Pipeline(stack, 'Pipeline', {
+        stages: [
+          {
+            stageName: 'Source',
+            actions: [new cpactions.CodeStarConnectionsSourceAction({
+              actionName: 'Source',
+              owner: 'my-owner',
+              repo: 'my-repo',
+              output: sourceOutput,
+              connectionArn: 'arn:aws:codestar-connections:us-east-1:123456789012:connection/12345678-abcd-12ab-34cdef5678gh',
+              codeBuildCloneOutput: false,
+            })],
+          },
+          {
+            stageName: 'Build',
+            actions: [new cpactions.CodeBuildAction({
+              actionName: 'Build',
+              project: new codebuild.PipelineProject(stack, 'MyProject'),
+              input: sourceOutput,
+            })],
+          },
+        ],
+      });
+
+      const template = Template.fromStack(stack);
+      const pipelines = template.findResources('AWS::CodePipeline::Pipeline');
+      const pipelineResource = Object.values(pipelines)[0];
+      const buildAction = pipelineResource.Properties.Stages[1].Actions[0];
+      expect(buildAction.Configuration.ServiceRoleArnOverride).toBeUndefined();
+    });
   });
 });
