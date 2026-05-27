@@ -100,6 +100,14 @@ export class CodeStarConnectionsSourceAction extends Action {
    */
   public static readonly _CONNECTION_ARN_PROPERTY = 'CodeStarConnectionArnProperty';
 
+  /**
+   * The name of the property that holds the FullRepositoryId (owner/repo)
+   * inside of the CodePipeline Artifact's metadata.
+   *
+   * @internal
+   */
+  public static readonly _FULL_REPOSITORY_ID_PROPERTY = 'CodeStarConnectionFullRepositoryIdProperty';
+
   private readonly props: CodeStarConnectionsSourceActionProps;
 
   constructor(props: CodeStarConnectionsSourceActionProps) {
@@ -148,6 +156,8 @@ export class CodeStarConnectionsSourceAction extends Action {
     if (this.props.codeBuildCloneOutput === true) {
       this.props.output.setMetadata(CodeStarConnectionsSourceAction._CONNECTION_ARN_PROPERTY,
         this.props.connectionArn);
+      this.props.output.setMetadata(CodeStarConnectionsSourceAction._FULL_REPOSITORY_ID_PROPERTY,
+        `${this.props.owner}/${this.props.repo}`);
     }
 
     return {

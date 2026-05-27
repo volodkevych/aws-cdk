@@ -78,6 +78,18 @@ describe('CodeStar Connections source Action', () => {
     });
   });
 
+  test('setting codeBuildCloneOutput=true passes FullRepositoryId metadata to CodeBuild action', () => {
+    const stack = new Stack();
+
+    createBitBucketAndCodeBuildPipeline(stack, {
+      codeBuildCloneOutput: true,
+      owner: 'my-owner',
+      repo: 'my-repo',
+    });
+
+    Template.fromStack(stack);
+  });
+
   test('grant s3 putObjectACL to the following CodeBuild Project', () => {
     const stack = new Stack();
 
