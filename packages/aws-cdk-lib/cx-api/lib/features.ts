@@ -156,6 +156,7 @@ export const AUTOMATIC_L1_TRAITS = '@aws-cdk/core:automaticL1Traits';
 export const BATCH_DEFAULT_AL2023 = '@aws-cdk/aws-batch:defaultToAL2023';
 export const ANNOTATIONS_IN_VALIDATION_REPORT = '@aws-cdk/core:annotationsInValidationReport';
 export const DEFAULT_CROSS_STACK_REFERENCES = '@aws-cdk/core:defaultCrossStackReferences';
+export const CODEPIPELINE_CODEBUILD_SERVICE_ROLE_OVERRIDE = '@aws-cdk/aws-codepipeline-actions:useServiceRoleOverrideForCodeBuild';
 
 export const FLAGS: Record<string, FlagInfo> = {
   //////////////////////////////////////////////////////////////////////
@@ -1890,6 +1891,25 @@ export const FLAGS: Record<string, FlagInfo> = {
     introducedIn: { v2: '2.254.0' },
     recommendedValue: 'strong',
     unconfiguredBehavesLike: { v2: 'strong' },
+  },
+
+  //////////////////////////////////////////////////////////////////////
+  [CODEPIPELINE_CODEBUILD_SERVICE_ROLE_OVERRIDE]: {
+    type: FlagType.BugFix,
+    summary: 'Auto-create scoped service role override for CodeBuild actions with Full Clone source',
+    detailsMd: `
+      When enabled and a CodeBuild action receives input from a CodeStarConnections source
+      with Full Clone (codeBuildCloneOutput=true), CDK auto-creates a dedicated IAM role
+      with \`codeconnections:UseConnection\` scoped to the specific repository via a
+      \`codeconnections:FullRepositoryId\` condition. This role is set as
+      \`ServiceRoleArnOverride\` in the action configuration, preventing the build from
+      accessing other repositories reachable by the connection.
+
+      When disabled, the CodeBuild project's default service role is used with unscoped
+      \`UseConnection\` permission (legacy behavior).`,
+    introducedIn: { v2: 'V2NEXT' },
+    recommendedValue: true,
+    unconfiguredBehavesLike: { v2: false },
   },
 };
 
