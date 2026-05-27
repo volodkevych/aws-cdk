@@ -1,7 +1,8 @@
-import { Template } from '../../../assertions';
+import { Match, Template } from '../../../assertions';
 import * as codebuild from '../../../aws-codebuild';
 import * as codecommit from '../../../aws-codecommit';
 import * as codepipeline from '../../../aws-codepipeline';
+import * as iam from '../../../aws-iam';
 import * as s3 from '../../../aws-s3';
 import * as sns from '../../../aws-sns';
 import { App, SecretValue, Stack } from '../../../core';
@@ -377,6 +378,135 @@ describe('CodeBuild Action', () => {
           ],
         });
       });
+    });
+  });
+
+  describe('serviceRoleOverride', () => {
+    test('explicit prop sets ServiceRoleArnOverride in action configuration', () => {
+      const stack = new Stack();
+
+      const overrideRole = new iam.Role(stack, 'OverrideRole', {
+        assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
+      });
+
+      const sourceOutput = new codepipeline.Artifact();
+      new codepipeline.Pipeline(stack, 'Pipeline', {
+        stages: [
+          {
+            stageName: 'Source',
+            actions: [new cpactions.CodeStarConnectionsSourceAction({
+              actionName: 'Source',
+              owner: 'aws',
+              repo: 'aws-cdk',
+              output: sourceOutput,
+              connectionArn: 'arn:aws:codestar-connections:us-east-1:123456789012:connection/12345678-abcd-12ab-34cdef5678gh',
+            })],
+          },
+          {
+            stageName: 'Build',
+            actions: [new cpactions.CodeBuildAction({
+              actionName: 'Build',
+              project: new codebuild.PipelineProject(stack, 'MyProject'),
+              input: sourceOutput,
+              serviceRoleOverride: overrideRole,
+            })],
+          },
+        ],
+      });
+
+      Template.fromStack(stack).hasResourceProperties('AWS::CodePipeline::Pipeline', {
+        Stages: Match.arrayWith([
+          Match.objectLike({
+            Name: 'Build',
+            Actions: Match.arrayWith([
+              Match.objectLike({
+                Configuration: Match.objectLike({
+                  ServiceRoleArnOverride: { 'Fn::GetAtt': [Match.stringLikeRegexp('OverrideRole'), 'Arn'] },
+                }),
+              }),
+            ]),
+          }),
+        ]),
+      });
+    });
+
+    test('explicit prop grants iam:PassRole to pipeline role', () => {
+      const stack = new Stack();
+
+      const overrideRole = new iam.Role(stack, 'OverrideRole', {
+        assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
+      });
+
+      const sourceOutput = new codepipeline.Artifact();
+      new codepipeline.Pipeline(stack, 'Pipeline', {
+        stages: [
+          {
+            stageName: 'Source',
+            actions: [new cpactions.CodeStarConnectionsSourceAction({
+              actionName: 'Source',
+              owner: 'aws',
+              repo: 'aws-cdk',
+              output: sourceOutput,
+              connectionArn: 'arn:aws:codestar-connections:us-east-1:123456789012:connection/12345678-abcd-12ab-34cdef5678gh',
+            })],
+          },
+          {
+            stageName: 'Build',
+            actions: [new cpactions.CodeBuildAction({
+              actionName: 'Build',
+              project: new codebuild.PipelineProject(stack, 'MyProject'),
+              input: sourceOutput,
+              serviceRoleOverride: overrideRole,
+            })],
+          },
+        ],
+      });
+
+      Template.fromStack(stack).hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: 'iam:PassRole',
+              Effect: 'Allow',
+              Resource: { 'Fn::GetAtt': [Match.stringLikeRegexp('OverrideRole'), 'Arn'] },
+            }),
+          ]),
+        },
+      });
+    });
+
+    test('no ServiceRoleArnOverride when prop is not provided', () => {
+      const stack = new Stack();
+
+      const sourceOutput = new codepipeline.Artifact();
+      new codepipeline.Pipeline(stack, 'Pipeline', {
+        stages: [
+          {
+            stageName: 'Source',
+            actions: [new cpactions.CodeStarConnectionsSourceAction({
+              actionName: 'Source',
+              owner: 'aws',
+              repo: 'aws-cdk',
+              output: sourceOutput,
+              connectionArn: 'arn:aws:codestar-connections:us-east-1:123456789012:connection/12345678-abcd-12ab-34cdef5678gh',
+            })],
+          },
+          {
+            stageName: 'Build',
+            actions: [new cpactions.CodeBuildAction({
+              actionName: 'Build',
+              project: new codebuild.PipelineProject(stack, 'MyProject'),
+              input: sourceOutput,
+            })],
+          },
+        ],
+      });
+
+      const template = Template.fromStack(stack);
+      const pipelines = template.findResources('AWS::CodePipeline::Pipeline');
+      const pipelineResource = Object.values(pipelines)[0];
+      const buildAction = pipelineResource.Properties.Stages[1].Actions[0];
+      expect(buildAction.Configuration.ServiceRoleArnOverride).toBeUndefined();
     });
   });
 });

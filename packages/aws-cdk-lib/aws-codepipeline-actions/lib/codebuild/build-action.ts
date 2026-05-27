@@ -110,6 +110,20 @@ export interface CodeBuildActionProps extends codepipeline.CommonAwsActionProps 
    * @default false
    */
   readonly combineBatchBuildArtifacts?: boolean;
+
+  /**
+   * An IAM role that CodeBuild will assume instead of the project's default
+   * service role when this action executes.
+   *
+   * Use this to scope permissions (e.g., codeconnections:UseConnection with
+   * FullRepositoryId condition) to a specific pipeline without modifying the
+   * shared CodeBuild project role.
+   *
+   * @default - No override. The project's default service role is used.
+   * When the feature flag @aws-cdk/aws-codepipeline-actions:useServiceRoleOverrideForCodeBuild
+   * is enabled and a Full Clone source is detected, a scoped role is auto-created.
+   */
+  readonly serviceRoleOverride?: iam.IRole;
 }
 
 /**
@@ -215,8 +229,22 @@ export class CodeBuildAction extends Action {
       }
     }
 
+    // Handle service role override
+    let overrideRole: iam.IRole | undefined;
+    if (this.props.serviceRoleOverride) {
+      overrideRole = this.props.serviceRoleOverride;
+    }
+
+    if (overrideRole) {
+      options.role.addToPolicy(new iam.PolicyStatement({
+        actions: ['iam:PassRole'],
+        resources: [overrideRole.roleArn],
+      }));
+    }
+
     const configuration: any = {
       ProjectName: this.props.project.projectName,
+      ServiceRoleArnOverride: overrideRole?.roleArn,
       EnvironmentVariables: this.props.environmentVariables &&
         cdk.Stack.of(scope).toJsonString(codebuild.Project.serializeEnvVariables(this.props.environmentVariables,
           this.props.checkSecretsInPlainTextEnvVariables ?? true, this.props.project)),
